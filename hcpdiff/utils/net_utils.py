@@ -6,27 +6,8 @@ import torch
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, Optimizer
 from torch import nn
 from torch.optim import lr_scheduler
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, AutoTokenizer
 
-class TEUnetWrapper(nn.Module):
-    def __init__(self, unet, TE):
-        super().__init__()
-        self.unet = unet
-        self.TE = TE
-
-    def forward(self, prompt_ids, noisy_latents, timesteps, **kwargs):
-        input_all = dict(prompt_ids=prompt_ids, noisy_latents=noisy_latents, timesteps=timesteps, **kwargs)
-
-        if hasattr(self.TE, 'input_feeder'):
-            for feeder in self.TE.input_feeder:
-                feeder(input_all)
-        if hasattr(self.unet, 'input_feeder'):
-            for feeder in self.unet.input_feeder:
-                feeder(input_all)
-
-        encoder_hidden_states = self.TE(prompt_ids, output_hidden_states=True)  # Get the text embedding for conditioning
-        model_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states).sample  # Predict the noise residual
-        return model_pred
 
 def get_scheduler(
     name: Union[str, SchedulerType],
@@ -91,24 +72,45 @@ def get_scheduler(
 
     return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **scheduler_kwargs)
 
-def import_text_encoder_class(pretrained_model_name_or_path: str, revision: str):
-    text_encoder_config = PretrainedConfig.from_pretrained(
-        pretrained_model_name_or_path,
-        subfolder="text_encoder",
-        revision=revision,
-    )
-    model_class = text_encoder_config.architectures[0]
+def auto_tokenizer(pretrained_model_name_or_path: str, revision: str=None):
+    from hcpdiff.models.compose import SDXLTokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path, subfolder="tokenizer_2",
+            revision=revision, use_fast=False,
+        )
+        return SDXLTokenizer
+    except OSError:
+        # not sdxl, only one tokenizer
+        return AutoTokenizer
 
-    if model_class == "CLIPTextModel":
-        from transformers import CLIPTextModel
+def auto_text_encoder(pretrained_model_name_or_path: str, revision: str=None):
+    from hcpdiff.models.compose import SDXLTextEncoder
+    try:
+        text_encoder_config = PretrainedConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="text_encoder_2",
+            revision=revision,
+        )
+        return SDXLTextEncoder
+    except OSError:
+        text_encoder_config = PretrainedConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            subfolder="text_encoder",
+            revision=revision,
+        )
+        model_class = text_encoder_config.architectures[0]
 
-        return CLIPTextModel
-    elif model_class == "RobertaSeriesModelWithTransformation":
-        from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
+        if model_class == "CLIPTextModel":
+            from transformers import CLIPTextModel
 
-        return RobertaSeriesModelWithTransformation
-    else:
-        raise ValueError(f"{model_class} is not supported.")
+            return CLIPTextModel
+        elif model_class == "RobertaSeriesModelWithTransformation":
+            from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
+
+            return RobertaSeriesModelWithTransformation
+        else:
+            raise ValueError(f"{model_class} is not supported.")
 
 def remove_all_hooks(model: nn.Module) -> None:
     for name, child in model.named_modules():
